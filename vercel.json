@@ -1,0 +1,8 @@
+{
+  "version": 2,
+  "builds": [
+    { "src": "./index.js", "use": "@vercel/node" },
+    { "src": "api/renew-google-calendar.js", "use": "@vercel/node" }
+  ],
+  "routes": [{ "src": "/(.*)", "dest": "/" }]
+}
