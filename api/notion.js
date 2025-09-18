@@ -6,6 +6,7 @@ const { Client } = require("@notionhq/client");
 
 const router = express.Router();
 
+// Middleware para capturar rawBody
 router.use(
   express.json({
     verify: (req, res, buf) => {
@@ -31,7 +32,6 @@ function getGoogleAuth() {
   if (!CLIENT_ID || !CLIENT_SECRET || !REDIRECT_URI || !REFRESH_TOKEN) {
     throw new Error("Faltan variables de entorno para Google OAuth2");
   }
-
   const oAuth2Client = new google.auth.OAuth2(CLIENT_ID, CLIENT_SECRET, REDIRECT_URI);
   oAuth2Client.setCredentials({ refresh_token: REFRESH_TOKEN });
   return oAuth2Client;
@@ -72,7 +72,7 @@ function extractDateFromPage(page) {
   } else {
     const start = { date: startRaw };
     const endDate = fecha.end ? fecha.end : addDaysToDateString(startRaw, 1);
-    const end = { date: endDate };
+    const end = { start: endDate, date: endDate };
     return { start, end };
   }
 }
@@ -94,6 +94,13 @@ async function findCalendarEventByNotionPageId(pageId) {
 // --- Endpoint principal ---
 router.post("/", async (req, res) => {
   try {
+    // --- Manejo del token de verificación (primer request de Notion) ---
+    if (req.body?.verification_token) {
+      console.log("🔹 Notion webhook verification request recibido");
+      return res.status(200).send({ verification_token: req.body.verification_token });
+    }
+
+    // --- Validación de firma para eventos normales ---
     const signature = req.header("X-Notion-Signature");
     if (!signature) return res.status(400).send("Falta cabecera de firma");
     if (!VERIFICATION_TOKEN) return res.status(500).send("Falta VERIFICATION_TOKEN");
@@ -108,19 +115,18 @@ router.post("/", async (req, res) => {
     }
     if (!valid) return res.status(403).send("Firma inválida");
 
+    // --- Procesamiento de eventos ---
     const { type, entity } = req.body;
     if (entity?.type !== "page") return res.status(200).send();
 
     const pageId = entity.id;
     const page = await notion.pages.retrieve({ page_id: pageId });
-
     const title = extractTitleFromPage(page);
     const dateRange = extractDateFromPage(page);
     const { start, end } = dateRange || {};
 
     const auth = getGoogleAuth();
     const calendar = google.calendar({ version: "v3", auth });
-
     const existingEvent = await findCalendarEventByNotionPageId(pageId);
 
     // --- CREACIÓN ---
@@ -131,7 +137,6 @@ router.post("/", async (req, res) => {
         end,
         extendedProperties: { private: { notion_page_id: pageId, origin: "notion" } },
       };
-
       await calendar.events.insert({ calendarId: CALENDAR_ID, requestBody: eventBody });
       console.log("✅ Evento creado desde Notion:", pageId);
       return res.status(200).send();
@@ -147,7 +152,6 @@ router.post("/", async (req, res) => {
           private: { ...(existingEvent.extendedProperties?.private || {}), notion_page_id: pageId, origin: "notion" },
         },
       };
-
       await calendar.events.patch({ calendarId: CALENDAR_ID, eventId: existingEvent.id, requestBody: eventBody });
       console.log("📝 Evento actualizado desde Notion:", existingEvent.id);
       return res.status(200).send();
@@ -161,7 +165,6 @@ router.post("/", async (req, res) => {
     }
 
     console.log("⚠️ Evento recibido que no coincide con creación/actualización/eliminación:", JSON.stringify(req.body, null, 2));
-    console.log("existingEvent:", existingEvent);
     return res.status(200).send();
   } catch (err) {
     console.error("❌ Error en webhook de Notion:", err?.response?.data || err);
