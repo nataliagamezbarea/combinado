@@ -50,23 +50,27 @@ router.get("/create-watch", async (req, res) => {
 // --- Webhook que recibe las notificaciones ---
 router.post("/webhook", async (req, res) => {
   console.log("📩 Webhook recibido desde Google Calendar");
-  res.status(200).send(); // responder rápido
+  res.status(200).send();
 
   const state = req.header("X-Goog-Resource-State");
-  if (state === "sync") return; // ignorar notificación inicial
+  console.log("📌 Estado del recurso:", state);
+
+  if (state === "sync") return;
+  if (state !== "exists") return;
 
   try {
     const auth = getGoogleAuth();
     const calendar = google.calendar({ version: "v3", auth });
 
-    // Obtener el último evento actualizado
+    const updatedMin = new Date(Date.now() - 5 * 60 * 1000).toISOString();
     const eventsResponse = await calendar.events.list({
       calendarId: CALENDAR_ID,
       maxResults: 1,
-      singleEvents: true,
-      showDeleted: false,
       orderBy: "updated",
+      updatedMin,
     });
+
+    console.log("📦 Eventos recibidos:", eventsResponse.data.items);
 
     const lastEvent = eventsResponse.data.items?.[0];
     if (!lastEvent) {
@@ -80,11 +84,10 @@ router.post("/webhook", async (req, res) => {
 
     console.log(`🎯 Último evento: ${title} (${start} → ${end})`);
 
-    // Crear una nueva página en Notion
     await notion.pages.create({
       parent: { database_id: NOTION_DATABASE_ID },
       properties: {
-        Título: { title: [{ text: { content: title } }] },
+        Nombre: { title: [{ text: { content: title } }] },
         "Fecha de entrega": { date: { start, end } },
       },
     });
@@ -94,5 +97,6 @@ router.post("/webhook", async (req, res) => {
     console.error("❌ Error procesando webhook:", err.message);
   }
 });
+
 
 module.exports = router;
