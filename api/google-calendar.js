@@ -45,87 +45,51 @@ router.get("/create-watch", async (req, res) => {
 
 // --- Endpoint para recibir notificaciones de Google Calendar ---
 router.post("/webhook", async (req, res) => {
-  console.log("📩 Webhook recibido de Google Calendar!");
-  console.log("Headers:", req.headers);
-
+  console.log("📩 Webhook recibido!");
   const state = req.header("X-Goog-Resource-State");
   const resourceId = req.header("X-Goog-Resource-Id");
   const resourceUri = req.header("X-Goog-Resource-Uri");
 
-  console.log("X-Goog-Resource-State:", state);
-  console.log("X-Goog-Resource-Id:", resourceId);
-  console.log("X-Goog-Resource-Uri:", resourceUri);
-
-  if (state === "sync") {
-    console.log("Sync event recibido, ignorando...");
-    return res.status(200).send();
-  }
+  if (state === "sync") return res.status(200).send();
 
   try {
     const auth = getGoogleAuth();
     const calendar = google.calendar({ version: "v3", auth });
 
-    // Si Google nos envía un resourceId, podemos obtener directamente ese evento
-    if (resourceId) {
-      // Extraer el eventId de la resourceUri
-      const match = resourceUri.match(/events\/([^?]+)/);
-      const eventId = match ? match[1] : null;
+    if (resourceId && resourceUri) {
+      const url = new URL(resourceUri);
+      const pathSegments = url.pathname.split("/");
+      const eventId = pathSegments[pathSegments.length - 1];
 
       if (eventId) {
         const eventResponse = await calendar.events.get({
           calendarId: CALENDAR_ID,
-          eventId: eventId,
+          eventId,
           showDeleted: true,
         });
 
         const event = eventResponse.data;
-
-        console.log("🎯 Evento modificado:");
-        console.log("Título:", event.summary);
-        console.log("Estado:", event.status);
-        console.log("Creado:", event.created);
-        console.log("Actualizado:", event.updated);
-        console.log("Link:", event.htmlLink);
+        console.log(event.status === "cancelled" ? "⚠️ Evento cancelado" : "🎯 Evento modificado", event.summary);
+        console.log("Creado:", event.created, "Actualizado:", event.updated, "Link:", event.htmlLink);
         return res.status(200).send();
       }
     }
 
-    // En caso de que no tengamos resourceId, listar los eventos como fallback
+    // Fallback
     const eventsResponse = await calendar.events.list({
       calendarId: CALENDAR_ID,
-      singleEvents: false,
+      singleEvents: true,
       showDeleted: true,
+      maxResults: 10,
       orderBy: "updated",
     });
 
-    const events = eventsResponse.data.items;
+    const events = eventsResponse.data.items || [];
+    if (events.length === 0) return res.status(200).send();
 
-    if (!events || events.length === 0) {
-      console.log("No hay eventos para mostrar.");
-      return res.status(200).send();
-    }
-
-    // Mostrar todos los eventos
-    console.log("🎯 Todos los eventos:");
-    events.forEach((evento, index) => {
-      console.log(`${index + 1}. Título: ${evento.summary}`);
-      console.log(`   Estado: ${evento.status}`);
-      console.log(`   Creado: ${evento.created}`);
-      console.log(`   Actualizado: ${evento.updated}`);
-      console.log(`   Link: ${evento.htmlLink}`);
-      console.log("   ---------------------------");
+    events.forEach((evento, i) => {
+      console.log(`${i + 1}. ${evento.summary} (${evento.status}) - ${evento.updated}`);
     });
-
-    // Último evento modificado
-    const ultimoEvento = events.reduce((prev, current) => {
-      return new Date(prev.updated) > new Date(current.updated) ? prev : current;
-    });
-
-    console.log("🎯 Último evento modificado:");
-    console.log("Título:", ultimoEvento.summary);
-    console.log("Estado:", ultimoEvento.status);
-    console.log("Actualizado:", ultimoEvento.updated);
-    console.log("Link:", ultimoEvento.htmlLink);
 
     res.status(200).send();
   } catch (err) {
