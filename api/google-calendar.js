@@ -49,7 +49,12 @@ router.post("/webhook", async (req, res) => {
   console.log("Headers:", req.headers);
 
   const state = req.header("X-Goog-Resource-State");
+  const resourceId = req.header("X-Goog-Resource-Id");
+  const resourceUri = req.header("X-Goog-Resource-Uri");
+
   console.log("X-Goog-Resource-State:", state);
+  console.log("X-Goog-Resource-Id:", resourceId);
+  console.log("X-Goog-Resource-Uri:", resourceUri);
 
   if (state === "sync") {
     console.log("Sync event recibido, ignorando...");
@@ -60,13 +65,38 @@ router.post("/webhook", async (req, res) => {
     const auth = getGoogleAuth();
     const calendar = google.calendar({ version: "v3", auth });
 
-    // Listar todos los eventos
+    // Si Google nos envía un resourceId, podemos obtener directamente ese evento
+    if (resourceId) {
+      // Extraer el eventId de la resourceUri
+      const match = resourceUri.match(/events\/([^?]+)/);
+      const eventId = match ? match[1] : null;
+
+      if (eventId) {
+        const eventResponse = await calendar.events.get({
+          calendarId: CALENDAR_ID,
+          eventId: eventId,
+          showDeleted: true,
+        });
+
+        const event = eventResponse.data;
+
+        console.log("🎯 Evento modificado:");
+        console.log("Título:", event.summary);
+        console.log("Estado:", event.status);
+        console.log("Creado:", event.created);
+        console.log("Actualizado:", event.updated);
+        console.log("Link:", event.htmlLink);
+        return res.status(200).send();
+      }
+    }
+
+    // En caso de que no tengamos resourceId, listar los eventos como fallback
     const eventsResponse = await calendar.events.list({
       calendarId: CALENDAR_ID,
       singleEvents: true,
       maxResults: 50,
-      showDeleted: true, // Incluye eventos cancelados
-      orderBy: "updated", // Opcional: los más recientes primero
+      showDeleted: true,
+      orderBy: "updated",
     });
 
     const events = eventsResponse.data.items;
@@ -87,7 +117,7 @@ router.post("/webhook", async (req, res) => {
       console.log("   ---------------------------");
     });
 
-    // Identificar el último modificado
+    // Último evento modificado
     const ultimoEvento = events.reduce((prev, current) => {
       return new Date(prev.updated) > new Date(current.updated) ? prev : current;
     });
@@ -100,7 +130,7 @@ router.post("/webhook", async (req, res) => {
 
     res.status(200).send();
   } catch (err) {
-    console.error("❌ Error listando eventos:", err);
+    console.error("❌ Error obteniendo eventos:", err);
     res.status(500).send();
   }
 });
