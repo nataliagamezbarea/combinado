@@ -5,21 +5,24 @@ const { Client } = require("@notionhq/client");
 
 const router = express.Router();
 
-const SERVICE_ACCOUNT_JSON = JSON.parse(process.env.SERVICE_ACCOUNT_JSON || "{}");
 const CALENDAR_ID = process.env.GOOGLE_CALENDAR_ID;
 const NOTION_API_KEY = process.env.NOTION_API_KEY;
 const NOTION_DATABASE_ID = process.env.NOTION_DATABASE_ID;
 const WEBHOOK_URL = process.env.WEBHOOK_URL;
 
+const CLIENT_ID = process.env.CLIENT_ID;
+const CLIENT_SECRET = process.env.CLIENT_SECRET;
+const REDIRECT_URI = process.env.REDIRECT_URI;
+const REFRESH_TOKEN = process.env.REFRESH_TOKEN;
+
 const notion = new Client({ auth: NOTION_API_KEY });
 const processingEvents = new Set();
 
+// --- Google OAuth2 Client ---
 function getGoogleAuth() {
-  return new google.auth.JWT({
-    email: SERVICE_ACCOUNT_JSON.client_email,
-    key: SERVICE_ACCOUNT_JSON.private_key?.replace(/\\n/g, "\n"),
-    scopes: ["https://www.googleapis.com/auth/calendar"],
-  });
+  const oAuth2Client = new google.auth.OAuth2(CLIENT_ID, CLIENT_SECRET, REDIRECT_URI);
+  oAuth2Client.setCredentials({ refresh_token: REFRESH_TOKEN });
+  return oAuth2Client;
 }
 
 // --- Funciones auxiliares ---
@@ -39,6 +42,50 @@ function formatAllDayDates(start, end) {
 
   return { startDate, endDate };
 }
+
+// /login
+router.get("/login", (req, res) => {
+  const oAuth2Client = new google.auth.OAuth2(CLIENT_ID, CLIENT_SECRET, REDIRECT_URI);
+  const authUrl = oAuth2Client.generateAuthUrl({
+    access_type: "offline",
+    scope: ["https://www.googleapis.com/auth/calendar"],
+  });
+  res.redirect(authUrl);
+});
+
+// /callback
+// /callback
+router.get("/oauth2callback", async (req, res) => {
+  const code = req.query.code;
+  const oAuth2Client = new google.auth.OAuth2(CLIENT_ID, CLIENT_SECRET, REDIRECT_URI);
+
+  try {
+    const { tokens } = await oAuth2Client.getToken(code);
+    console.log("Tokens obtenidos:", tokens);
+
+    if (tokens.refresh_token) {
+      console.log(`REFRESH_TOKEN=${tokens.refresh_token}`);
+      res.send(`
+        <h1>Tokens generados</h1>
+        <p><strong>REFRESH_TOKEN:</strong> ${tokens.refresh_token}</p>
+        <pre>${JSON.stringify(tokens, null, 2)}</pre>
+      `);
+    } else {
+      console.log("No se recibió refresh token. Asegúrate de usar access_type: 'offline'.");
+      res.send(`
+        <h1>Error</h1>
+        <p>No se recibió <strong>refresh token</strong>. Asegúrate de usar <code>access_type: 'offline'</code>.</p>
+        <pre>${JSON.stringify(tokens, null, 2)}</pre>
+      `);
+    }
+
+  } catch (error) {
+    console.error("Error obteniendo tokens:", error);
+    res.status(500).send(`<h1>Error obteniendo tokens</h1><p>${error.message}</p>`);
+  }
+});
+
+
 
 // --- Endpoint GET para crear un watch en Google Calendar ---
 router.get("/create-watch", async (req, res) => {
