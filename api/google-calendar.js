@@ -94,7 +94,6 @@ router.post("/webhook", async (req, res) => {
     const eventsResponse = await calendar.events.list({
       calendarId: CALENDAR_ID,
       singleEvents: true,
-      maxResults: 50,
       showDeleted: true,
       orderBy: "updated",
     });
