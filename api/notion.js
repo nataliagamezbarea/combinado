@@ -14,19 +14,27 @@ router.use(
   })
 );
 
+// --- Variables de entorno ---
 const VERIFICATION_TOKEN = process.env.NOTION_VERIFICATION_TOKEN;
 const NOTION_API_KEY = process.env.NOTION_API_KEY;
 const CALENDAR_ID = process.env.GOOGLE_CALENDAR_ID;
-const SERVICE_ACCOUNT_JSON = JSON.parse(process.env.SERVICE_ACCOUNT_JSON || "{}");
+const CLIENT_ID = process.env.CLIENT_ID;
+const CLIENT_SECRET = process.env.CLIENT_SECRET;
+const REDIRECT_URI = process.env.REDIRECT_URI;
+const REFRESH_TOKEN = process.env.REFRESH_TOKEN;
 
+// --- Cliente de Notion ---
 const notion = new Client({ auth: NOTION_API_KEY });
 
+// --- Google OAuth2 Client ---
 function getGoogleAuth() {
-  return new google.auth.JWT({
-    email: SERVICE_ACCOUNT_JSON.client_email,
-    key: SERVICE_ACCOUNT_JSON.private_key?.replace(/\\n/g, "\n"),
-    scopes: ["https://www.googleapis.com/auth/calendar"],
-  });
+  if (!CLIENT_ID || !CLIENT_SECRET || !REDIRECT_URI || !REFRESH_TOKEN) {
+    throw new Error("Faltan variables de entorno para Google OAuth2");
+  }
+
+  const oAuth2Client = new google.auth.OAuth2(CLIENT_ID, CLIENT_SECRET, REDIRECT_URI);
+  oAuth2Client.setCredentials({ refresh_token: REFRESH_TOKEN });
+  return oAuth2Client;
 }
 
 // --- Función para extraer título de Notion ---
@@ -40,7 +48,7 @@ function extractTitleFromPage(page) {
   return "Sin título";
 }
 
-// --- Función para manejar fechas ---
+// --- Funciones de fecha ---
 function addDaysToDateString(dateStr, days) {
   const d = new Date(dateStr + "T00:00:00Z");
   d.setUTCDate(d.getUTCDate() + days);
@@ -69,7 +77,7 @@ function extractDateFromPage(page) {
   }
 }
 
-// --- Función para buscar evento existente ---
+// --- Buscar evento existente ---
 async function findCalendarEventByNotionPageId(pageId) {
   const auth = getGoogleAuth();
   const calendar = google.calendar({ version: "v3", auth });
@@ -88,7 +96,6 @@ router.post("/", async (req, res) => {
   try {
     const signature = req.header("X-Notion-Signature");
     if (!signature) return res.status(400).send("Falta cabecera de firma");
-
     if (!VERIFICATION_TOKEN) return res.status(500).send("Falta VERIFICATION_TOKEN");
 
     const computed = crypto.createHmac("sha256", VERIFICATION_TOKEN).update(req.rawBody).digest("hex");
