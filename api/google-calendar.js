@@ -84,7 +84,7 @@ router.post("/webhook", async (req, res) => {
     await notion.pages.create({
       parent: { database_id: NOTION_DATABASE_ID },
       properties: {
-        Nombre: { title: [{ text: { content: title } }] },
+        Título: { title: [{ text: { content: title } }] },
         "Fecha de entrega": { date: { start, end } },
       },
     });
