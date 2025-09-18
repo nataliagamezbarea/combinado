@@ -72,7 +72,7 @@ function extractDateFromPage(page) {
   } else {
     const start = { date: startRaw };
     const endDate = fecha.end ? fecha.end : addDaysToDateString(startRaw, 1);
-    const end = { start: endDate, date: endDate };
+    const end = { date: endDate };
     return { start, end };
   }
 }
@@ -94,13 +94,15 @@ async function findCalendarEventByNotionPageId(pageId) {
 // --- Endpoint principal ---
 router.post("/", async (req, res) => {
   try {
+    console.log("📩 Webhook recibido:", JSON.stringify(req.body, null, 2));
+
     // --- Manejo del token de verificación (primer request de Notion) ---
     if (req.body?.verification_token) {
-      console.log("🔹 Notion webhook verification request recibido");
+      console.log("🔹 Solicitud de verificación del webhook");
       return res.status(200).send({ verification_token: req.body.verification_token });
     }
 
-    // --- Validación de firma para eventos normales ---
+    // --- Validación de firma ---
     const signature = req.header("X-Notion-Signature");
     if (!signature) return res.status(400).send("Falta cabecera de firma");
     if (!VERIFICATION_TOKEN) return res.status(500).send("Falta VERIFICATION_TOKEN");
@@ -114,10 +116,14 @@ router.post("/", async (req, res) => {
       valid = false;
     }
     if (!valid) return res.status(403).send("Firma inválida");
+    console.log("✅ Firma de Notion validada correctamente");
 
     // --- Procesamiento de eventos ---
     const { type, entity } = req.body;
-    if (entity?.type !== "page") return res.status(200).send();
+    if (!entity || entity.type !== "page") {
+      console.log("⚠️ Evento ignorado: no es un page");
+      return res.status(200).send();
+    }
 
     const pageId = entity.id;
     const page = await notion.pages.retrieve({ page_id: pageId });
@@ -137,8 +143,8 @@ router.post("/", async (req, res) => {
         end,
         extendedProperties: { private: { notion_page_id: pageId, origin: "notion" } },
       };
-      await calendar.events.insert({ calendarId: CALENDAR_ID, requestBody: eventBody });
-      console.log("✅ Evento creado desde Notion:", pageId);
+      const inserted = await calendar.events.insert({ calendarId: CALENDAR_ID, requestBody: eventBody });
+      console.log("✅ Evento creado en Google Calendar:", inserted.data);
       return res.status(200).send();
     }
 
@@ -152,15 +158,15 @@ router.post("/", async (req, res) => {
           private: { ...(existingEvent.extendedProperties?.private || {}), notion_page_id: pageId, origin: "notion" },
         },
       };
-      await calendar.events.patch({ calendarId: CALENDAR_ID, eventId: existingEvent.id, requestBody: eventBody });
-      console.log("📝 Evento actualizado desde Notion:", existingEvent.id);
+      const patched = await calendar.events.patch({ calendarId: CALENDAR_ID, eventId: existingEvent.id, requestBody: eventBody });
+      console.log("📝 Evento actualizado en Google Calendar:", patched.data);
       return res.status(200).send();
     }
 
     // --- ELIMINACIÓN ---
     if (type === "page.deleted" && existingEvent) {
       await calendar.events.delete({ calendarId: CALENDAR_ID, eventId: existingEvent.id });
-      console.log("🗑️ Evento eliminado desde Notion:", existingEvent.id);
+      console.log("🗑️ Evento eliminado de Google Calendar:", existingEvent.id);
       return res.status(200).send();
     }
 
