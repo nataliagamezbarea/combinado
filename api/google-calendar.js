@@ -18,14 +18,14 @@ const WEBHOOK_URL = process.env.WEBHOOK_URL;
 const notion = new Client({ auth: NOTION_API_KEY });
 const processingEvents = new Set();
 
-// --- Autenticación Google OAuth2 ---
+// -------------------- AUTH --------------------
 function getGoogleAuth() {
   const oauth2Client = new google.auth.OAuth2(OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET, OAUTH_REDIRECT_URI);
   oauth2Client.setCredentials({ refresh_token: OAUTH_REFRESH_TOKEN });
   return oauth2Client;
 }
 
-// --- Utilidades ---
+// -------------------- UTILIDADES --------------------
 function isAllDayEvent(ev) {
   return !!(ev.start?.date && !ev.start?.dateTime);
 }
@@ -36,14 +36,14 @@ function formatAllDayDates(start, end) {
 
   if (endDate) {
     const d = new Date(endDate);
-    d.setDate(d.getDate() - 1); // end.date es exclusivo
+    d.setDate(d.getDate() - 1); // end.date es exclusivo → restar un día
     endDate = d.toISOString().split("T")[0];
   }
 
   return { startDate, endDate };
 }
 
-// --- Notion ---
+// -------------------- NOTION --------------------
 async function createNotionPage(ev) {
   try {
     let startDate, endDate;
@@ -93,7 +93,7 @@ async function isPageArchived(pageId) {
   }
 }
 
-// --- Endpoint GET para iniciar un canal de watch ---
+// -------------------- WATCH --------------------
 router.get("/create-watch", async (req, res) => {
   try {
     const auth = getGoogleAuth();
@@ -118,27 +118,24 @@ router.get("/create-watch", async (req, res) => {
   }
 });
 
-// --- Endpoint POST Webhook ---
+// -------------------- WEBHOOK --------------------
 router.post("/webhook", async (req, res) => {
   try {
     const state = req.header("X-Goog-Resource-State");
-    const channelId = req.header("X-Goog-Channel-Id");
     const resourceId = req.header("X-Goog-Resource-Id");
 
-    console.log("📩 Webhook recibido", { state, channelId, resourceId });
+    console.log("📩 Webhook recibido", { state, resourceId });
 
-    // Responder inmediatamente
+    // Siempre responder rápido para que Google no cierre el canal
     res.status(200).send();
 
-    // Ignorar el webhook inicial de sincronización
+    // Ignorar el primer webhook de tipo sync
     if (state === "sync") return;
-
-    // Solo procesar si hay cambios reales
     if (state !== "exists" && state !== "not_exists") return;
 
-    // Evitar reprocesar el mismo recurso varias veces
+    // Evitar reprocesar si otro webhook paralelo está en curso
     if (processingEvents.has(resourceId)) {
-      console.log("⏳ Ya se está procesando este recurso, se ignora");
+      console.log("⏳ Ya se está procesando este recurso");
       return;
     }
     processingEvents.add(resourceId);
@@ -146,26 +143,24 @@ router.post("/webhook", async (req, res) => {
     const auth = getGoogleAuth();
     const calendar = google.calendar({ version: "v3", auth });
 
-    // Buscar solo eventos actualizados en los últimos 2 minutos
+    // Solo eventos modificados en los últimos 2 minutos
     const updatedMin = new Date(Date.now() - 2 * 60 * 1000).toISOString();
+
     const response = await calendar.events.list({
       calendarId: CALENDAR_ID,
       updatedMin,
       singleEvents: true,
       showDeleted: true,
-      maxResults: 10,
       orderBy: "updated",
+      maxResults: 10,
     });
 
     const events = response.data.items || [];
-    console.log(`🔍 Eventos recientes: ${events.length}`);
-
-    if (events.length === 0) {
-      processingEvents.delete(resourceId);
-      return;
-    }
+    console.log(`🔍 ${events.length} eventos recientes`);
 
     for (const ev of events) {
+      if (!ev.id) continue;
+
       try {
         if (ev.status === "cancelled") {
           const notionPageId = ev.extendedProperties?.private?.notion_page_id;
@@ -173,9 +168,10 @@ router.post("/webhook", async (req, res) => {
           continue;
         }
 
-        let notionPageId = ev.extendedProperties?.private?.notion_page_id;
+        const notionPageId = ev.extendedProperties?.private?.notion_page_id;
 
         if (notionPageId) {
+          // --- Actualizar página existente ---
           const archived = await isPageArchived(notionPageId);
           if (!archived) {
             let startDate, endDate;
@@ -196,22 +192,25 @@ router.post("/webhook", async (req, res) => {
                 "Fecha de entrega": startDate ? { date: { start: startDate, end: endDate } } : undefined,
               },
             });
-            console.log("♻️ Página actualizada:", notionPageId);
+
+            console.log("♻️ Página actualizada en Notion:", notionPageId);
           }
         } else {
+          // --- Crear página nueva ---
           const newPageId = await createNotionPage(ev);
-          if (newPageId) {
-            await calendar.events.patch({
-              calendarId: CALENDAR_ID,
-              eventId: ev.id,
-              requestBody: {
-                extendedProperties: {
-                  private: { origin: "calendar", notion_page_id: newPageId },
-                },
+          if (!newPageId) continue;
+
+          await calendar.events.patch({
+            calendarId: CALENDAR_ID,
+            eventId: ev.id,
+            requestBody: {
+              extendedProperties: {
+                private: { origin: "calendar", notion_page_id: newPageId },
               },
-            });
-            console.log("🆕 Página creada y vinculada:", newPageId);
-          }
+            },
+          });
+
+          console.log("🆕 Página creada y vinculada:", newPageId);
         }
       } catch (err) {
         console.warn("⚠️ Error procesando evento:", err.message);
@@ -220,7 +219,7 @@ router.post("/webhook", async (req, res) => {
 
     processingEvents.delete(resourceId);
   } catch (error) {
-    console.error("❌ Error en webhook:", error?.response?.data || error.message || error);
+    console.error("❌ Error en webhook:", error.response?.data || error.message || error);
     res.status(500).send("Error interno");
   }
 });
