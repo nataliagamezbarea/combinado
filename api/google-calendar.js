@@ -13,89 +13,133 @@ const REFRESH_TOKEN = process.env.REFRESH_TOKEN;
 
 const NOTION_API_KEY = process.env.NOTION_API_KEY;
 const NOTION_DATABASE_ID = process.env.NOTION_DATABASE_ID;
-const WEBHOOK_URL = process.env.WEBHOOK_URL;
 
 // --- Cliente de Notion ---
 const notion = new Client({ auth: NOTION_API_KEY });
+const processingEvents = new Set();
 
-// --- Cliente de Google OAuth ---
+// --- Autenticación OAuth2 ---
 function getGoogleAuth() {
   const oAuth2Client = new google.auth.OAuth2(CLIENT_ID, CLIENT_SECRET, REDIRECT_URI);
   oAuth2Client.setCredentials({ refresh_token: REFRESH_TOKEN });
   return oAuth2Client;
 }
 
-// --- Endpoint para crear el canal de watch ---
-router.get("/create-watch", async (req, res) => {
+// --- Crear página en Notion ---
+async function createNotionPage(ev) {
   try {
-    const auth = getGoogleAuth();
-    const calendar = google.calendar({ version: "v3", auth });
-
-    const response = await calendar.events.watch({
-      calendarId: CALENDAR_ID,
-      requestBody: {
-        id: Math.random().toString(36).substring(2), // ID único aleatorio
-        type: "webhook",
-        address: WEBHOOK_URL, // Debe ser HTTPS público
-      },
-    });
-
-    console.log("✅ Canal de watch creado:", response.data);
-    res.json({ ok: true, data: response.data });
-  } catch (err) {
-    console.error("❌ Error creando watch:", err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// --- Webhook que recibe las notificaciones ---
-router.post("/webhook", async (req, res) => {
-  console.log("📩 Webhook recibido desde Google Calendar");
-  res.status(200).send(); // responder rápido
-
-  const state = req.header("X-Goog-Resource-State");
-  console.log("📌 Estado del recurso:", state);
-
-  if (state === "sync") return; // notificación inicial, se ignora
-  if (state !== "exists") return; // solo procesamos cambios reales
-
-  try {
-    const auth = getGoogleAuth();
-    const calendar = google.calendar({ version: "v3", auth });
-
-    // ⚠️ Quitar updatedMin para asegurarnos de obtener algo
-    const eventsResponse = await calendar.events.list({
-      calendarId: CALENDAR_ID,
-      maxResults: 5,
-      singleEvents: true,
-      orderBy: "updated",
-    });
-
-    console.log("📦 Eventos recibidos:", JSON.stringify(eventsResponse.data.items, null, 2));
-
-    const lastEvent = eventsResponse.data.items?.[0];
-    if (!lastEvent) {
-      console.log("⚠️ No hay eventos en el calendario");
-      return;
-    }
-
-    const title = lastEvent.summary || "Sin título";
-    const start = lastEvent.start?.dateTime || lastEvent.start?.date;
-    const end = lastEvent.end?.dateTime || lastEvent.end?.date;
-
-    console.log(`🎯 Último evento: ${title} (${start} → ${end})`);
-
-    await notion.pages.create({
+    const page = await notion.pages.create({
       parent: { database_id: NOTION_DATABASE_ID },
       properties: {
-        Nombre: { title: [{ text: { content: title } }] },
-        "Fecha de entrega": { date: { start, end } },
+        Título: {
+          title: [
+            {
+              type: "text",
+              text: { content: ev.summary || "Sin título" },
+            },
+          ],
+        },
+        "Fecha de entrega":
+          ev.start?.dateTime || ev.start?.date
+            ? {
+                date: {
+                  start: ev.start.dateTime || ev.start.date,
+                  end: ev.end?.dateTime || ev.end?.date || null,
+                },
+              }
+            : undefined,
       },
     });
-
-    console.log("✅ Página creada en Notion con el último evento");
+    return page.id;
   } catch (err) {
-    console.error("❌ Error procesando webhook:", err.message);
+    console.warn("⚠️ Error creando página en Notion:", err.message);
+    return null;
+  }
+}
+
+// --- Webhook ---
+router.post("/webhook", async (req, res) => {
+  try {
+    const state = req.header("X-Goog-Resource-State");
+    if (state === "sync") return res.status(200).send();
+
+    if (state === "exists" || state === "not_exists") {
+      const auth = getGoogleAuth();
+      const calendar = google.calendar({ version: "v3", auth });
+
+      const twoMinutesAgo = new Date(Date.now() - 2 * 60 * 1000).toISOString();
+      const events = await calendar.events.list({
+        calendarId: CALENDAR_ID,
+        updatedMin: twoMinutesAgo,
+        showDeleted: true,
+        singleEvents: true,
+      });
+
+      for (const ev of events.data.items || []) {
+        if (processingEvents.has(ev.id)) continue;
+        processingEvents.add(ev.id);
+
+        try {
+          if (ev.status === "cancelled") continue;
+
+          const origin = ev.extendedProperties?.private?.origin;
+          const notionPageId = ev.extendedProperties?.private?.notion_page_id;
+
+          if (notionPageId) {
+            console.log("⏩ Evento ya vinculado con Notion:", notionPageId);
+            continue;
+          }
+
+          if (origin === "calendar") {
+            console.log("⏩ Evento con origin=calendar → ignorado");
+            continue;
+          }
+
+          // 1) marcar origin=calendar
+          await calendar.events.patch({
+            calendarId: CALENDAR_ID,
+            eventId: ev.id,
+            requestBody: {
+              extendedProperties: {
+                private: {
+                  ...(ev.extendedProperties?.private || {}),
+                  origin: "calendar",
+                },
+              },
+            },
+          });
+
+          // 2) crear página en Notion
+          const newPageId = await createNotionPage(ev);
+          if (!newPageId) continue;
+
+          // 3) guardar notion_page_id
+          await calendar.events.patch({
+            calendarId: CALENDAR_ID,
+            eventId: ev.id,
+            requestBody: {
+              extendedProperties: {
+                private: {
+                  origin: "calendar",
+                  notion_page_id: newPageId,
+                },
+              },
+            },
+          });
+
+          console.log("🆕 Página creada y vinculada a evento Calendar:", newPageId);
+        } catch (err) {
+          console.warn("⚠️ Error procesando evento:", err.message);
+        } finally {
+          processingEvents.delete(ev.id);
+        }
+      }
+    }
+
+    res.status(200).send();
+  } catch (error) {
+    console.error("❌ Error general webhook:", error);
+    res.status(500).send("Error interno");
   }
 });
 
