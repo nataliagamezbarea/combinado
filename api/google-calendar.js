@@ -61,15 +61,30 @@ router.post("/webhook", async (req, res) => {
     const calendar = google.calendar({ version: "v3", auth });
 
     // Listar los últimos eventos modificados
-    const events = await calendar.events.list({
+    const eventsResponse = await calendar.events.list({
       calendarId: CALENDAR_ID,
-      orderBy: "updated",
       singleEvents: true,
-      maxResults: 5,
+      maxResults: 50,
       showDeleted: true,
     });
 
-    console.log("🎯 Últimos eventos modificados:", JSON.stringify(events.data.items, null, 2));
+    const events = eventsResponse.data.items;
+
+    if (!events || events.length === 0) {
+      console.log("No hay eventos para procesar.");
+      return res.status(200).send();
+    }
+
+    // Encontrar el evento con la fecha de actualización más reciente
+    const ultimoEvento = events.reduce((prev, current) => {
+      return new Date(prev.updated) > new Date(current.updated) ? prev : current;
+    });
+
+    console.log("🎯 Último evento modificado:");
+    console.log("Título:", ultimoEvento.summary);
+    console.log("Estado:", ultimoEvento.status);
+    console.log("Actualizado:", ultimoEvento.updated);
+    console.log("Link:", ultimoEvento.htmlLink);
 
     res.status(200).send();
   } catch (err) {
