@@ -93,7 +93,7 @@ router.post("/webhook", async (req, res) => {
     // En caso de que no tengamos resourceId, listar los eventos como fallback
     const eventsResponse = await calendar.events.list({
       calendarId: CALENDAR_ID,
-      singleEvents: true,
+      singleEvents: false,
       showDeleted: true,
       orderBy: "updated",
     });
