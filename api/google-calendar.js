@@ -1,16 +1,16 @@
-// calendar-to-notion.js
 const express = require("express");
 const { google } = require("googleapis");
 const { Client } = require("@notionhq/client");
 
 const router = express.Router();
 
+// ⚙️ ENV
 const OAUTH_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const OAUTH_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
 const OAUTH_REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI;
 const OAUTH_REFRESH_TOKEN = process.env.GOOGLE_REFRESH_TOKEN;
-
 const CALENDAR_ID = process.env.GOOGLE_CALENDAR_ID;
+
 const NOTION_API_KEY = process.env.NOTION_API_KEY;
 const NOTION_DATABASE_ID = process.env.NOTION_DATABASE_ID;
 const WEBHOOK_URL = process.env.WEBHOOK_URL;
@@ -70,10 +70,8 @@ async function createNotionPage(ev) {
 
 async function archiveNotionPage(pageId) {
   try {
-    const page = await notion.pages.retrieve({ page_id: pageId });
-    if (page.archived) return;
     await notion.pages.update({ page_id: pageId, archived: true });
-    console.log(`🗑️ Página archivada en Notion: ${pageId}`);
+    console.log(`🗑️ Página archivada: ${pageId}`);
   } catch (error) {
     console.warn("⚠️ Error archivando página en Notion:", error.message);
   }
@@ -83,13 +81,12 @@ async function isPageArchived(pageId) {
   try {
     const page = await notion.pages.retrieve({ page_id: pageId });
     return page.archived;
-  } catch (error) {
-    console.warn("⚠️ Error verificando página archivada:", error.message);
+  } catch {
     return false;
   }
 }
 
-// 🟢 NUEVO: Login para obtener refresh_token
+// 🟢 GET: Login manual para obtener refresh_token
 router.get("/login", (req, res) => {
   const oauth2Client = getGoogleAuth();
   const url = oauth2Client.generateAuthUrl({
@@ -100,7 +97,7 @@ router.get("/login", (req, res) => {
   res.redirect(url);
 });
 
-// 🟢 NUEVO: Callback para intercambiar el code por tokens
+// 🟢 GET: Callback OAuth
 router.get("/oauth2callback", async (req, res) => {
   const code = req.query.code;
   const oauth2Client = getGoogleAuth();
@@ -110,17 +107,17 @@ router.get("/oauth2callback", async (req, res) => {
     console.log("✅ Tokens recibidos:", tokens);
 
     if (tokens.refresh_token) {
-      console.log("📌 REFRESH_TOKEN (guárdalo en .env como GOOGLE_REFRESH_TOKEN):\n", tokens.refresh_token);
+      console.log("📌 REFRESH_TOKEN (añade a .env como GOOGLE_REFRESH_TOKEN):\n", tokens.refresh_token);
     }
 
-    res.send(`<h2>Autenticación completada ✅</h2><p>Mira la consola del servidor para copiar tu refresh_token.</p>`);
+    res.send("<h2>✅ Autenticado correctamente</h2><p>Revisa la consola del servidor para copiar tu refresh_token</p>");
   } catch (err) {
-    console.error("❌ Error intercambiando token:", err.message);
-    res.status(500).send("Error al obtener tokens");
+    console.error("❌ Error obteniendo tokens:", err.message);
+    res.status(500).send("Error en autenticación");
   }
 });
 
-// --- Endpoint GET para iniciar un canal de watch ---
+// 🟢 GET: Crear canal de Watch
 router.get("/create-watch", async (req, res) => {
   try {
     const auth = getGoogleAuth();
@@ -137,21 +134,21 @@ router.get("/create-watch", async (req, res) => {
     });
 
     console.log("✅ Watch iniciado:", response.data);
-    res.status(200).json({ message: "Watch iniciado", data: response.data });
+    res.json({ message: "Watch iniciado", data: response.data });
   } catch (error) {
     console.error("❌ Error creando watch:", error.response?.data || error.message);
     res.status(500).json({ error: error.response?.data || error.message });
   }
 });
 
-// --- Endpoint POST Webhook ---
+// 🟢 POST: Webhook
 router.post("/webhook", async (req, res) => {
   try {
     const state = req.header("X-Goog-Resource-State");
-    const channelId = req.header("X-Goog-Channel-Id");
     const resourceId = req.header("X-Goog-Resource-Id");
+    const channelId = req.header("X-Goog-Channel-Id");
 
-    console.log("📩 Webhook recibido", { state, channelId, resourceId });
+    console.log("📩 Notificación recibida:", { state, channelId, resourceId });
     res.status(200).send();
 
     if (state === "sync") return;
@@ -179,6 +176,7 @@ router.post("/webhook", async (req, res) => {
     for (const ev of events) {
       try {
         if (ev.status === "cancelled") {
+          console.log(`🔴 Eliminado: ${ev.id}`);
           const notionPageId = ev.extendedProperties?.private?.notion_page_id;
           if (notionPageId) await archiveNotionPage(notionPageId);
           continue;
@@ -207,7 +205,7 @@ router.post("/webhook", async (req, res) => {
                 "Fecha de entrega": startDate ? { date: { start: startDate, end: endDate } } : undefined,
               },
             });
-            console.log("♻️ Página actualizada:", notionPageId);
+            console.log("♻️ Actualizado:", notionPageId);
           }
         } else {
           const newPageId = await createNotionPage(ev);
@@ -231,7 +229,7 @@ router.post("/webhook", async (req, res) => {
 
     processingEvents.delete(resourceId);
   } catch (error) {
-    console.error("❌ Error en webhook:", error?.response?.data || error.message || error);
+    console.error("❌ Error en webhook:", error?.response?.data || error.message);
     res.status(500).send("Error interno");
   }
 });
