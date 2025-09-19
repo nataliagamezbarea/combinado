@@ -17,6 +17,7 @@ const WEBHOOK_URL = process.env.WEBHOOK_URL;
 
 const notion = new Client({ auth: NOTION_API_KEY });
 
+// ======== UTILS ========
 function getGoogleAuth() {
   const oauth2Client = new google.auth.OAuth2(OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET, OAUTH_REDIRECT_URI);
   oauth2Client.setCredentials({ refresh_token: OAUTH_REFRESH_TOKEN });
@@ -49,9 +50,7 @@ async function createNotionPage(ev) {
     }
 
     const properties = {
-      Título: {
-        title: [{ type: "text", text: { content: ev.summary || "Sin título" } }],
-      },
+      Título: { title: [{ type: "text", text: { content: ev.summary || "Sin título" } }] },
     };
     if (startDate) {
       properties["Fecha de entrega"] = {
@@ -91,8 +90,11 @@ async function archiveNotionPage(pageId) {
 const pendingEvents = [];
 let isProcessing = false;
 
-async function processNextEvent() {
-  if (isProcessing || pendingEvents.length === 0) return;
+async function processQueue() {
+  if (isProcessing || pendingEvents.length === 0) {
+    isProcessing = false;
+    return;
+  }
 
   isProcessing = true;
   const ev = pendingEvents.shift();
@@ -100,7 +102,7 @@ async function processNextEvent() {
   const calendar = google.calendar({ version: "v3", auth });
 
   try {
-    // marcar creando
+    // Marcar en Calendar que se está creando
     await calendar.events.patch({
       calendarId: CALENDAR_ID,
       eventId: ev.id,
@@ -129,38 +131,19 @@ async function processNextEvent() {
     console.warn("⚠️ Error procesando evento:", err.message || err);
   } finally {
     isProcessing = false;
+
+    // Si hay más eventos, procesar el siguiente tras 5 segundos
+    if (pendingEvents.length > 0) {
+      setTimeout(processQueue, 5000);
+    }
   }
 }
-
-// Procesar 1 evento cada 10 segundos
-setInterval(processNextEvent, 10_000);
 
 // =========================
 //    ENDPOINTS
 // =========================
 
-router.get("/create-watch", async (req, res) => {
-  try {
-    const auth = getGoogleAuth();
-    const calendar = google.calendar({ version: "v3", auth });
-    const channelId = `channel-${Date.now()}`;
-    const watchResponse = await calendar.events.watch({
-      calendarId: CALENDAR_ID,
-      requestBody: {
-        id: channelId,
-        type: "web_hook",
-        address: WEBHOOK_URL,
-      },
-    });
-    console.log("✅ Canal creado:", watchResponse.data);
-    res.json({ message: "Canal creado correctamente" });
-  } catch (err) {
-    console.error("❌ Error creando canal:", err.message || err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ⚡ Añadido arriba del archivo
+// ⚡ Para evitar duplicados
 const recentlyQueued = new Set();
 
 router.post("/webhook", async (req, res) => {
@@ -191,18 +174,20 @@ router.post("/webhook", async (req, res) => {
       }
 
       if (!ev.extendedProperties?.private?.notion_page_id) {
-        // ⚡ Evitar duplicados con recentlyQueued
         if (!recentlyQueued.has(ev.id)) {
           recentlyQueued.add(ev.id);
           pendingEvents.push(ev);
           console.log(`🟢 Añadido a la cola: ${ev.id}`);
-
-          // se borra del set después de 30 segundos
           setTimeout(() => recentlyQueued.delete(ev.id), 30_000);
         } else {
-          console.log(`⚪ Evento ${ev.id} ignorado (ya en recentlyQueued)`);
+          console.log(`⚪ Evento ${ev.id} ignorado (ya en cola recientemente)`);
         }
       }
+    }
+
+    // ⚡ Iniciar procesamiento si no está en marcha
+    if (!isProcessing && pendingEvents.length > 0) {
+      processQueue();
     }
 
     res.status(200).send();
@@ -211,6 +196,5 @@ router.post("/webhook", async (req, res) => {
     res.status(500).send("Error interno");
   }
 });
-
 
 module.exports = router;
