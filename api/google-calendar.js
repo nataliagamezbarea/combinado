@@ -160,6 +160,9 @@ router.get("/create-watch", async (req, res) => {
   }
 });
 
+// ⚡ Añadido arriba del archivo
+const recentlyQueued = new Set();
+
 router.post("/webhook", async (req, res) => {
   try {
     const state = req.header("X-Goog-Resource-State");
@@ -169,6 +172,7 @@ router.post("/webhook", async (req, res) => {
     const auth = getGoogleAuth();
     const calendar = google.calendar({ version: "v3", auth });
     const twoMinutesAgo = new Date(Date.now() - 2 * 60 * 1000).toISOString();
+
     const events = await calendar.events.list({
       calendarId: CALENDAR_ID,
       updatedMin: twoMinutesAgo,
@@ -185,11 +189,18 @@ router.post("/webhook", async (req, res) => {
         if (notionPageId) await archiveNotionPage(notionPageId);
         continue;
       }
+
       if (!ev.extendedProperties?.private?.notion_page_id) {
-        // solo añadimos a la cola si no está ya
-        if (!pendingEvents.find((e) => e.id === ev.id)) {
+        // ⚡ Evitar duplicados con recentlyQueued
+        if (!recentlyQueued.has(ev.id)) {
+          recentlyQueued.add(ev.id);
           pendingEvents.push(ev);
           console.log(`🟢 Añadido a la cola: ${ev.id}`);
+
+          // se borra del set después de 30 segundos
+          setTimeout(() => recentlyQueued.delete(ev.id), 30_000);
+        } else {
+          console.log(`⚪ Evento ${ev.id} ignorado (ya en recentlyQueued)`);
         }
       }
     }
@@ -200,5 +211,6 @@ router.post("/webhook", async (req, res) => {
     res.status(500).send("Error interno");
   }
 });
+
 
 module.exports = router;
