@@ -38,7 +38,11 @@ function checkRequiredEnv() {
 }
 
 function getGoogleAuth() {
-  const oauth2Client = new google.auth.OAuth2(OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET, OAUTH_REDIRECT_URI);
+  const oauth2Client = new google.auth.OAuth2(
+    OAUTH_CLIENT_ID,
+    OAUTH_CLIENT_SECRET,
+    OAUTH_REDIRECT_URI
+  );
   oauth2Client.setCredentials({ refresh_token: OAUTH_REFRESH_TOKEN });
   return oauth2Client;
 }
