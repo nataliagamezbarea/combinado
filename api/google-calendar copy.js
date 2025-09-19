@@ -1,4 +1,3 @@
-// calendar-to-notion-oauth.js
 const express = require("express");
 const { google } = require("googleapis");
 const { Client } = require("@notionhq/client");
@@ -19,6 +18,7 @@ const WEBHOOK_URL = process.env.WEBHOOK_URL;
 // ======== Cliente Notion & util ========
 const notion = new Client({ auth: NOTION_API_KEY });
 const processingEvents = new Set();
+const createdLinks = new Map(); // ⚡ NUEVO: guarda relaciones eventId → notion_page_id en memoria
 
 function checkRequiredEnv() {
   const missing = [];
@@ -38,7 +38,6 @@ function checkRequiredEnv() {
 }
 
 function getGoogleAuth() {
-  // OAuth2 client con refresh_token
   const oauth2Client = new google.auth.OAuth2(OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET, OAUTH_REDIRECT_URI);
   oauth2Client.setCredentials({ refresh_token: OAUTH_REFRESH_TOKEN });
   return oauth2Client;
@@ -49,10 +48,9 @@ function isAllDayEvent(ev) {
 }
 
 function formatAllDayDates(start, end) {
-  const startDate = start; // YYYY-MM-DD
+  const startDate = start;
   let endDate = end;
   if (endDate) {
-    // Google Calendar usa end.date como exclusivo; restamos 1 día para Notion
     const d = new Date(endDate);
     d.setDate(d.getDate() - 1);
     endDate = d.toISOString().split("T")[0];
@@ -60,7 +58,6 @@ function formatAllDayDates(start, end) {
   return { startDate, endDate };
 }
 
-// --- Crear página en Notion (con parent.database_id correctamente incluido) ---
 async function createNotionPage(ev) {
   try {
     let startDate, endDate;
@@ -71,7 +68,6 @@ async function createNotionPage(ev) {
       endDate = ev.end?.dateTime || null;
     }
 
-    // Construir propiedades sin incluir undefined
     const properties = {
       Título: {
         title: [{ type: "text", text: { content: ev.summary || "Sin título" } }],
@@ -122,7 +118,6 @@ async function isPageArchived(pageId) {
 //    ENDPOINTS
 // =========================
 
-// Crear canal (watch)
 router.get("/create-watch", async (req, res) => {
   try {
     checkRequiredEnv();
@@ -147,7 +142,6 @@ router.get("/create-watch", async (req, res) => {
   }
 });
 
-// Webhook (solo ejecuta lógica cuando hay cambios reales)
 router.post("/webhook", async (req, res) => {
   try {
     checkRequiredEnv();
@@ -166,7 +160,6 @@ router.post("/webhook", async (req, res) => {
       return res.status(200).send();
     }
 
-    // Solo procesar si es 'exists' o 'not_exists'
     if (state !== "exists" && state !== "not_exists") {
       console.log("⚪ Estado no procesable por este webhook:", state);
       return res.status(200).send();
@@ -174,8 +167,6 @@ router.post("/webhook", async (req, res) => {
 
     const auth = getGoogleAuth();
     const calendar = google.calendar({ version: "v3", auth });
-
-    // Buscar eventos actualizados en los últimos 2 minutos
     const twoMinutesAgo = new Date(Date.now() - 2 * 60 * 1000).toISOString();
 
     const events = await calendar.events.list({
@@ -212,13 +203,11 @@ router.post("/webhook", async (req, res) => {
         const origin = ev.extendedProperties?.private?.origin;
         const notionPageId = ev.extendedProperties?.private?.notion_page_id;
 
-        // Si origin === 'calendar' y no hay notionPageId, ignorar (previene loop)
         if (origin === "calendar" && !notionPageId) {
           console.log(`⚪ Ignorado evento ${ev.id} con origin=calendar y sin notion_page_id`);
           continue;
         }
 
-        // Si existe notionPageId, actualizar la página
         if (notionPageId) {
           const archived = await isPageArchived(notionPageId);
           if (archived) {
@@ -251,7 +240,6 @@ router.post("/webhook", async (req, res) => {
           console.log(`📝 Actualizada página Notion ${notionPageId} ← evento ${ev.id}`);
         }
 
-        // Marcar evento con origin: "calendar" para evitar loops
         await calendar.events.patch({
           calendarId: CALENDAR_ID,
           eventId: ev.id,
@@ -262,22 +250,27 @@ router.post("/webhook", async (req, res) => {
           },
         });
 
-        // Si no había notionPageId, crear página nueva y vincularla
         if (!notionPageId) {
-          const newPageId = await createNotionPage(ev);
-          if (!newPageId) {
-            console.warn(`⚠️ No se creó página Notion para evento ${ev.id}`);
+          // ⚡ Nueva lógica: no crear duplicado si ya lo hicimos antes en esta sesión
+          if (createdLinks.has(ev.id)) {
+            console.log(`⚪ Evento ${ev.id} ya tiene página Notion creada (${createdLinks.get(ev.id)})`);
           } else {
-            await calendar.events.patch({
-              calendarId: CALENDAR_ID,
-              eventId: ev.id,
-              requestBody: {
-                extendedProperties: {
-                  private: { origin: "calendar", notion_page_id: newPageId },
+            const newPageId = await createNotionPage(ev);
+            if (!newPageId) {
+              console.warn(`⚠️ No se creó página Notion para evento ${ev.id}`);
+            } else {
+              createdLinks.set(ev.id, newPageId);
+              await calendar.events.patch({
+                calendarId: CALENDAR_ID,
+                eventId: ev.id,
+                requestBody: {
+                  extendedProperties: {
+                    private: { origin: "calendar", notion_page_id: newPageId },
+                  },
                 },
-              },
-            });
-            console.log(`🔗 Evento ${ev.id} vinculado a Notion page ${newPageId}`);
+              });
+              console.log(`🔗 Evento ${ev.id} vinculado a Notion page ${newPageId}`);
+            }
           }
         }
       } catch (err) {
