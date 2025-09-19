@@ -18,14 +18,14 @@ const WEBHOOK_URL = process.env.WEBHOOK_URL;
 const notion = new Client({ auth: NOTION_API_KEY });
 const processingEvents = new Set();
 
-// --- Autenticación Google OAuth2 ---
 function getGoogleAuth() {
   const oauth2Client = new google.auth.OAuth2(OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET, OAUTH_REDIRECT_URI);
-  oauth2Client.setCredentials({ refresh_token: OAUTH_REFRESH_TOKEN });
+  if (OAUTH_REFRESH_TOKEN) {
+    oauth2Client.setCredentials({ refresh_token: OAUTH_REFRESH_TOKEN });
+  }
   return oauth2Client;
 }
 
-// --- Utilidades ---
 function isAllDayEvent(ev) {
   return !!(ev.start?.date && !ev.start?.dateTime);
 }
@@ -33,21 +33,17 @@ function isAllDayEvent(ev) {
 function formatAllDayDates(start, end) {
   const startDate = start;
   let endDate = end;
-
   if (endDate) {
     const d = new Date(endDate);
-    d.setDate(d.getDate() - 1); // end.date es exclusivo
+    d.setDate(d.getDate() - 1);
     endDate = d.toISOString().split("T")[0];
   }
-
   return { startDate, endDate };
 }
 
-// --- Notion ---
 async function createNotionPage(ev) {
   try {
     let startDate, endDate;
-
     if (isAllDayEvent(ev)) {
       ({ startDate, endDate } = formatAllDayDates(ev.start.date, ev.end?.date));
     } else {
@@ -93,6 +89,37 @@ async function isPageArchived(pageId) {
   }
 }
 
+// 🟢 NUEVO: Login para obtener refresh_token
+router.get("/login", (req, res) => {
+  const oauth2Client = getGoogleAuth();
+  const url = oauth2Client.generateAuthUrl({
+    access_type: "offline",
+    prompt: "consent",
+    scope: ["https://www.googleapis.com/auth/calendar", "https://www.googleapis.com/auth/calendar.events"],
+  });
+  res.redirect(url);
+});
+
+// 🟢 NUEVO: Callback para intercambiar el code por tokens
+router.get("/oauth2callback", async (req, res) => {
+  const code = req.query.code;
+  const oauth2Client = getGoogleAuth();
+
+  try {
+    const { tokens } = await oauth2Client.getToken(code);
+    console.log("✅ Tokens recibidos:", tokens);
+
+    if (tokens.refresh_token) {
+      console.log("📌 REFRESH_TOKEN (guárdalo en .env como GOOGLE_REFRESH_TOKEN):\n", tokens.refresh_token);
+    }
+
+    res.send(`<h2>Autenticación completada ✅</h2><p>Mira la consola del servidor para copiar tu refresh_token.</p>`);
+  } catch (err) {
+    console.error("❌ Error intercambiando token:", err.message);
+    res.status(500).send("Error al obtener tokens");
+  }
+});
+
 // --- Endpoint GET para iniciar un canal de watch ---
 router.get("/create-watch", async (req, res) => {
   try {
@@ -100,7 +127,6 @@ router.get("/create-watch", async (req, res) => {
     const calendar = google.calendar({ version: "v3", auth });
 
     const watchId = `watch-${Date.now()}`;
-
     const response = await calendar.events.watch({
       calendarId: CALENDAR_ID,
       requestBody: {
@@ -126,27 +152,17 @@ router.post("/webhook", async (req, res) => {
     const resourceId = req.header("X-Goog-Resource-Id");
 
     console.log("📩 Webhook recibido", { state, channelId, resourceId });
-
-    // Responder inmediatamente
     res.status(200).send();
 
-    // Ignorar el webhook inicial de sincronización
     if (state === "sync") return;
-
-    // Solo procesar si hay cambios reales
     if (state !== "exists" && state !== "not_exists") return;
 
-    // Evitar reprocesar el mismo recurso varias veces
-    if (processingEvents.has(resourceId)) {
-      console.log("⏳ Ya se está procesando este recurso, se ignora");
-      return;
-    }
+    if (processingEvents.has(resourceId)) return;
     processingEvents.add(resourceId);
 
     const auth = getGoogleAuth();
     const calendar = google.calendar({ version: "v3", auth });
 
-    // Buscar solo eventos actualizados en los últimos 2 minutos
     const updatedMin = new Date(Date.now() - 2 * 60 * 1000).toISOString();
     const response = await calendar.events.list({
       calendarId: CALENDAR_ID,
@@ -159,11 +175,6 @@ router.post("/webhook", async (req, res) => {
 
     const events = response.data.items || [];
     console.log(`🔍 Eventos recientes: ${events.length}`);
-
-    if (events.length === 0) {
-      processingEvents.delete(resourceId);
-      return;
-    }
 
     for (const ev of events) {
       try {
