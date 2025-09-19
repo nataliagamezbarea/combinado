@@ -9,22 +9,19 @@ const OAUTH_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
 const OAUTH_REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI;
 const OAUTH_REFRESH_TOKEN = process.env.GOOGLE_REFRESH_TOKEN;
 const CALENDAR_ID = process.env.GOOGLE_CALENDAR_ID;
+
 const WEBHOOK_URL = process.env.WEBHOOK_URL;
 
-/**
- * Devuelve un cliente OAuth2 con el refresh_token ya configurado
- */
+// 🛠️ Helper OAuth2
 function getGoogleAuth() {
   const oauth2Client = new google.auth.OAuth2(OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET, OAUTH_REDIRECT_URI);
-
   if (OAUTH_REFRESH_TOKEN) {
     oauth2Client.setCredentials({ refresh_token: OAUTH_REFRESH_TOKEN });
   }
-
   return oauth2Client;
 }
 
-// 🟢 GET: Login OAuth
+// 🟢 GET: Login para obtener el refresh_token
 router.get("/login", (req, res) => {
   const oauth2Client = getGoogleAuth();
   const url = oauth2Client.generateAuthUrl({
@@ -35,7 +32,7 @@ router.get("/login", (req, res) => {
   res.redirect(url);
 });
 
-// 🟢 GET: Callback OAuth
+// 🟢 GET: Callback OAuth2 para obtener y mostrar refresh_token
 router.get("/oauth2callback", async (req, res) => {
   const code = req.query.code;
   const oauth2Client = getGoogleAuth();
@@ -45,7 +42,7 @@ router.get("/oauth2callback", async (req, res) => {
     console.log("✅ Tokens recibidos:", tokens);
 
     if (tokens.refresh_token) {
-      console.log("📌 REFRESH_TOKEN (añade a .env como GOOGLE_REFRESH_TOKEN):\n", tokens.refresh_token);
+      console.log("📌 REFRESH_TOKEN (añádelo a .env como GOOGLE_REFRESH_TOKEN):\n", tokens.refresh_token);
     }
 
     res.send("<h2>✅ Autenticado correctamente</h2><p>Revisa la consola del servidor para copiar tu refresh_token</p>");
@@ -55,12 +52,11 @@ router.get("/oauth2callback", async (req, res) => {
   }
 });
 
-// 🟢 GET: Crear canal de notificaciones (Watch)
+// 🟢 GET: Crear canal de notificación (igual que antes)
 router.get("/create-watch", async (req, res) => {
   try {
     const auth = getGoogleAuth();
     const calendar = google.calendar({ version: "v3", auth });
-
     const channelId = `channel-${Date.now()}`;
 
     const watchResponse = await calendar.events.watch({
@@ -84,7 +80,7 @@ router.get("/create-watch", async (req, res) => {
   }
 });
 
-// 📨 POST: Webhook que recibe notificaciones de cambios
+// 📨 POST: Webhook que recibe notificaciones de cambios (igual que antes)
 router.post("/webhook", async (req, res) => {
   try {
     const state = req.header("X-Goog-Resource-State");
