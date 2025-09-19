@@ -15,26 +15,7 @@ const NOTION_API_KEY = process.env.NOTION_API_KEY;
 const NOTION_DATABASE_ID = process.env.NOTION_DATABASE_ID;
 const WEBHOOK_URL = process.env.WEBHOOK_URL;
 
-// ======== Cliente Notion & util ========
 const notion = new Client({ auth: NOTION_API_KEY });
-const processingEvents = new Set();
-
-function checkRequiredEnv() {
-  const missing = [];
-  if (!OAUTH_CLIENT_ID) missing.push("GOOGLE_CLIENT_ID");
-  if (!OAUTH_CLIENT_SECRET) missing.push("GOOGLE_CLIENT_SECRET");
-  if (!OAUTH_REFRESH_TOKEN) missing.push("GOOGLE_REFRESH_TOKEN");
-  if (!CALENDAR_ID) missing.push("GOOGLE_CALENDAR_ID");
-  if (!NOTION_API_KEY) missing.push("NOTION_API_KEY");
-  if (!NOTION_DATABASE_ID) missing.push("NOTION_DATABASE_ID");
-  if (!WEBHOOK_URL) missing.push("WEBHOOK_URL");
-
-  if (missing.length) {
-    const errMsg = `Faltan variables de entorno: ${missing.join(", ")}`;
-    console.warn("⚠️ " + errMsg);
-    throw new Error(errMsg);
-  }
-}
 
 function getGoogleAuth() {
   const oauth2Client = new google.auth.OAuth2(OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET, OAUTH_REDIRECT_URI);
@@ -47,7 +28,7 @@ function isAllDayEvent(ev) {
 }
 
 function formatAllDayDates(start, end) {
-  const startDate = start; // YYYY-MM-DD
+  const startDate = start;
   let endDate = end;
   if (endDate) {
     const d = new Date(endDate);
@@ -72,7 +53,6 @@ async function createNotionPage(ev) {
         title: [{ type: "text", text: { content: ev.summary || "Sin título" } }],
       },
     };
-
     if (startDate) {
       properties["Fecha de entrega"] = {
         date: endDate ? { start: startDate, end: endDate } : { start: startDate },
@@ -84,7 +64,7 @@ async function createNotionPage(ev) {
       properties,
     });
 
-    console.log(`🆕 Notion page created: ${page.id} for event ${ev.id}`);
+    console.log(`🆕 Página Notion creada: ${page.id} para evento ${ev.id}`);
     return page.id;
   } catch (err) {
     console.warn("⚠️ Error creando página en Notion:", err.message || err);
@@ -95,36 +75,75 @@ async function createNotionPage(ev) {
 async function archiveNotionPage(pageId) {
   try {
     const page = await notion.pages.retrieve({ page_id: pageId });
-    if (page.archived) return;
-    await notion.pages.update({ page_id: pageId, archived: true });
-    console.log(`🗑️ Página archivada en Notion: ${pageId}`);
-  } catch (error) {
-    console.warn("⚠️ Error archivando página en Notion:", error.message || error);
+    if (!page.archived) {
+      await notion.pages.update({ page_id: pageId, archived: true });
+      console.log(`🗑️ Página archivada en Notion: ${pageId}`);
+    }
+  } catch (err) {
+    console.warn("⚠️ Error archivando página Notion:", err.message || err);
   }
 }
 
-async function isPageArchived(pageId) {
+// =========================
+//    COLA DE EVENTOS
+// =========================
+
+const pendingEvents = [];
+let isProcessing = false;
+
+async function processNextEvent() {
+  if (isProcessing || pendingEvents.length === 0) return;
+
+  isProcessing = true;
+  const ev = pendingEvents.shift();
+  const auth = getGoogleAuth();
+  const calendar = google.calendar({ version: "v3", auth });
+
   try {
-    const page = await notion.pages.retrieve({ page_id: pageId });
-    return page.archived;
-  } catch (error) {
-    console.warn("⚠️ Error verificando página archivada:", error.message || error);
-    return false;
+    // marcar creando
+    await calendar.events.patch({
+      calendarId: CALENDAR_ID,
+      eventId: ev.id,
+      requestBody: {
+        extendedProperties: {
+          private: { ...(ev.extendedProperties?.private || {}), creating: "true" },
+        },
+      },
+    });
+
+    const pageId = await createNotionPage(ev);
+
+    if (pageId) {
+      await calendar.events.patch({
+        calendarId: CALENDAR_ID,
+        eventId: ev.id,
+        requestBody: {
+          extendedProperties: {
+            private: { origin: "calendar", notion_page_id: pageId },
+          },
+        },
+      });
+      console.log(`🔗 Evento ${ev.id} vinculado a Notion page ${pageId}`);
+    }
+  } catch (err) {
+    console.warn("⚠️ Error procesando evento:", err.message || err);
+  } finally {
+    isProcessing = false;
   }
 }
+
+// Procesar 1 evento cada 10 segundos
+setInterval(processNextEvent, 10_000);
 
 // =========================
 //    ENDPOINTS
 // =========================
 
-// Crear canal (watch)
 router.get("/create-watch", async (req, res) => {
   try {
-    checkRequiredEnv();
     const auth = getGoogleAuth();
     const calendar = google.calendar({ version: "v3", auth });
     const channelId = `channel-${Date.now()}`;
-
     const watchResponse = await calendar.events.watch({
       calendarId: CALENDAR_ID,
       requestBody: {
@@ -133,167 +152,51 @@ router.get("/create-watch", async (req, res) => {
         address: WEBHOOK_URL,
       },
     });
-
     console.log("✅ Canal creado:", watchResponse.data);
-    res.json({ message: "Canal creado correctamente", data: watchResponse.data });
-  } catch (error) {
-    console.error("❌ Error creando canal:", error.response?.data || error.message);
-    res.status(500).json({ error: error.response?.data || error.message });
+    res.json({ message: "Canal creado correctamente" });
+  } catch (err) {
+    console.error("❌ Error creando canal:", err.message || err);
+    res.status(500).json({ error: err.message });
   }
 });
 
-// Webhook (sin duplicados)
 router.post("/webhook", async (req, res) => {
   try {
-    checkRequiredEnv();
-
     const state = req.header("X-Goog-Resource-State");
-    const resourceId = req.header("X-Goog-Resource-Id");
-    const channelId = req.header("X-Goog-Channel-Id");
-
-    console.log("📩 Notificación recibida:");
-    console.log("  Resource State:", state);
-    console.log("  Resource ID:", resourceId);
-    console.log("  Channel ID:", channelId);
-
-    if (state === "sync") {
-      console.log("⚪ Primera sincronización (sync) - no procesamos eventos ahora.");
-      return res.status(200).send();
-    }
-
-    if (state !== "exists" && state !== "not_exists") {
-      console.log("⚪ Estado no procesable por este webhook:", state);
-      return res.status(200).send();
-    }
+    if (state === "sync") return res.status(200).send();
+    if (state !== "exists" && state !== "not_exists") return res.status(200).send();
 
     const auth = getGoogleAuth();
     const calendar = google.calendar({ version: "v3", auth });
-
     const twoMinutesAgo = new Date(Date.now() - 2 * 60 * 1000).toISOString();
-
     const events = await calendar.events.list({
       calendarId: CALENDAR_ID,
       updatedMin: twoMinutesAgo,
       showDeleted: true,
       singleEvents: true,
       orderBy: "updated",
-      maxResults: 20,
+      maxResults: 10,
     });
 
     const items = events.data.items || [];
-    if (items.length === 0) {
-      console.log("⚪ No hay eventos recientes (según updatedMin).");
-      return res.status(200).send();
-    }
-
     for (const ev of items) {
-      if (!ev.id) continue;
-      if (processingEvents.has(ev.id)) continue;
-      processingEvents.add(ev.id);
-
-      try {
-        const ext = ev.extendedProperties?.private || {};
-
-        if (ext.creating === "true") {
-          console.log(`⏳ Evento ${ev.id} está en creación → ignorado`);
-          continue;
+      if (ev.status === "cancelled") {
+        const notionPageId = ev.extendedProperties?.private?.notion_page_id;
+        if (notionPageId) await archiveNotionPage(notionPageId);
+        continue;
+      }
+      if (!ev.extendedProperties?.private?.notion_page_id) {
+        // solo añadimos a la cola si no está ya
+        if (!pendingEvents.find((e) => e.id === ev.id)) {
+          pendingEvents.push(ev);
+          console.log(`🟢 Añadido a la cola: ${ev.id}`);
         }
-
-        if (ev.status === "cancelled") {
-          if (ext.notion_page_id) {
-            await archiveNotionPage(ext.notion_page_id);
-          } else {
-            console.log(`🔴 Evento cancelado ${ev.id} (sin notion_page_id).`);
-          }
-          continue;
-        }
-
-        const notionPageId = ext.notion_page_id;
-
-        if (ext.origin === "calendar" && !notionPageId) {
-          console.log(`⚪ Ignorado evento ${ev.id} con origin=calendar y sin notion_page_id`);
-          continue;
-        }
-
-        if (notionPageId) {
-          const archived = await isPageArchived(notionPageId);
-          if (archived) {
-            console.log(`⚪ Página Notion ${notionPageId} ya archivada — ignoro.`);
-            continue;
-          }
-
-          let startDate, endDate;
-          if (isAllDayEvent(ev)) {
-            ({ startDate, endDate } = formatAllDayDates(ev.start.date, ev.end?.date));
-          } else {
-            startDate = ev.start?.dateTime;
-            endDate = ev.end?.dateTime || null;
-          }
-
-          const updateProps = {
-            Título: { title: [{ type: "text", text: { content: ev.summary || "Sin título" } }] },
-          };
-          if (startDate) {
-            updateProps["Fecha de entrega"] = {
-              date: endDate ? { start: startDate, end: endDate } : { start: startDate },
-            };
-          }
-
-          await notion.pages.update({
-            page_id: notionPageId,
-            properties: updateProps,
-          });
-
-          console.log(`📝 Actualizada página Notion ${notionPageId} ← evento ${ev.id}`);
-        }
-
-        if (!notionPageId) {
-          // Bloquear el evento con "creating=true"
-          await calendar.events.patch({
-            calendarId: CALENDAR_ID,
-            eventId: ev.id,
-            requestBody: {
-              extendedProperties: {
-                private: { ...(ext || {}), origin: "calendar", creating: "true" },
-              },
-            },
-          });
-
-          const newPageId = await createNotionPage(ev);
-
-          if (newPageId) {
-            await calendar.events.patch({
-              calendarId: CALENDAR_ID,
-              eventId: ev.id,
-              requestBody: {
-                extendedProperties: {
-                  private: { origin: "calendar", notion_page_id: newPageId },
-                },
-              },
-            });
-            console.log(`🔗 Evento ${ev.id} vinculado a Notion page ${newPageId}`);
-          } else {
-            await calendar.events.patch({
-              calendarId: CALENDAR_ID,
-              eventId: ev.id,
-              requestBody: {
-                extendedProperties: {
-                  private: { ...(ext || {}), origin: "calendar" },
-                },
-              },
-            });
-          }
-        }
-      } catch (err) {
-        console.warn("⚠️ Error procesando evento:", err?.message || err);
-      } finally {
-        processingEvents.delete(ev.id);
       }
     }
 
     res.status(200).send();
-  } catch (error) {
-    console.error("❌ Error en webhook:", error?.response?.data || error?.message || error);
+  } catch (err) {
+    console.error("❌ Error en webhook:", err.message || err);
     res.status(500).send("Error interno");
   }
 });
