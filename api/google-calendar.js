@@ -38,6 +38,7 @@ function checkRequiredEnv() {
 }
 
 function getGoogleAuth() {
+  // OAuth2 client con refresh_token
   const oauth2Client = new google.auth.OAuth2(OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET, OAUTH_REDIRECT_URI);
   oauth2Client.setCredentials({ refresh_token: OAUTH_REFRESH_TOKEN });
   return oauth2Client;
@@ -48,9 +49,10 @@ function isAllDayEvent(ev) {
 }
 
 function formatAllDayDates(start, end) {
-  const startDate = start;
+  const startDate = start; // YYYY-MM-DD
   let endDate = end;
   if (endDate) {
+    // Google Calendar usa end.date como exclusivo; restamos 1 día para Notion
     const d = new Date(endDate);
     d.setDate(d.getDate() - 1);
     endDate = d.toISOString().split("T")[0];
@@ -58,6 +60,7 @@ function formatAllDayDates(start, end) {
   return { startDate, endDate };
 }
 
+// --- Crear página en Notion (con parent.database_id correctamente incluido) ---
 async function createNotionPage(ev) {
   try {
     let startDate, endDate;
@@ -68,11 +71,13 @@ async function createNotionPage(ev) {
       endDate = ev.end?.dateTime || null;
     }
 
+    // Construir propiedades sin incluir undefined
     const properties = {
       Título: {
         title: [{ type: "text", text: { content: ev.summary || "Sin título" } }],
       },
     };
+
     if (startDate) {
       properties["Fecha de entrega"] = {
         date: endDate ? { start: startDate, end: endDate } : { start: startDate },
@@ -95,10 +100,9 @@ async function createNotionPage(ev) {
 async function archiveNotionPage(pageId) {
   try {
     const page = await notion.pages.retrieve({ page_id: pageId });
-    if (!page.archived) {
-      await notion.pages.update({ page_id: pageId, archived: true });
-      console.log(`🗑️ Página archivada en Notion: ${pageId}`);
-    }
+    if (page.archived) return;
+    await notion.pages.update({ page_id: pageId, archived: true });
+    console.log(`🗑️ Página archivada en Notion: ${pageId}`);
   } catch (error) {
     console.warn("⚠️ Error archivando página en Notion:", error.message || error);
   }
@@ -118,6 +122,7 @@ async function isPageArchived(pageId) {
 //    ENDPOINTS
 // =========================
 
+// Crear canal (watch)
 router.get("/create-watch", async (req, res) => {
   try {
     checkRequiredEnv();
@@ -142,28 +147,37 @@ router.get("/create-watch", async (req, res) => {
   }
 });
 
-// =========================
-//        WEBHOOK
-// =========================
-
+// Webhook (solo ejecuta lógica cuando hay cambios reales)
 router.post("/webhook", async (req, res) => {
   try {
     checkRequiredEnv();
 
     const state = req.header("X-Goog-Resource-State");
+    const resourceId = req.header("X-Goog-Resource-Id");
+    const channelId = req.header("X-Goog-Channel-Id");
+
+    console.log("📩 Notificación recibida:");
+    console.log("  Resource State:", state);
+    console.log("  Resource ID:", resourceId);
+    console.log("  Channel ID:", channelId);
+
     if (state === "sync") {
-      console.log("⚪ Primera sincronización");
+      console.log("⚪ Primera sincronización (sync) - no procesamos eventos ahora.");
       return res.status(200).send();
     }
+
+    // Solo procesar si es 'exists' o 'not_exists'
     if (state !== "exists" && state !== "not_exists") {
-      console.log("⚪ Estado ignorado:", state);
+      console.log("⚪ Estado no procesable por este webhook:", state);
       return res.status(200).send();
     }
 
     const auth = getGoogleAuth();
     const calendar = google.calendar({ version: "v3", auth });
 
+    // Buscar eventos actualizados en los últimos 2 minutos
     const twoMinutesAgo = new Date(Date.now() - 2 * 60 * 1000).toISOString();
+
     const events = await calendar.events.list({
       calendarId: CALENDAR_ID,
       updatedMin: twoMinutesAgo,
@@ -173,7 +187,13 @@ router.post("/webhook", async (req, res) => {
       maxResults: 20,
     });
 
-    for (const ev of events.data.items || []) {
+    const items = events.data.items || [];
+    if (items.length === 0) {
+      console.log("⚪ No hay eventos recientes (según updatedMin).");
+      return res.status(200).send();
+    }
+
+    for (const ev of items) {
       if (!ev.id) continue;
       if (processingEvents.has(ev.id)) continue;
       processingEvents.add(ev.id);
@@ -181,57 +201,73 @@ router.post("/webhook", async (req, res) => {
       try {
         if (ev.status === "cancelled") {
           const notionPageId = ev.extendedProperties?.private?.notion_page_id;
-          if (notionPageId) await archiveNotionPage(notionPageId);
+          if (notionPageId) {
+            await archiveNotionPage(notionPageId);
+          } else {
+            console.log(`🔴 Evento cancelado ${ev.id} (sin notion_page_id).`);
+          }
           continue;
         }
 
-        const ext = ev.extendedProperties?.private || {};
-        if (ext.creating === "true") {
-          console.log(`⏳ Evento ${ev.id} está en creación → ignorado por ahora`);
+        const origin = ev.extendedProperties?.private?.origin;
+        const notionPageId = ev.extendedProperties?.private?.notion_page_id;
+
+        // Si origin === 'calendar' y no hay notionPageId, ignorar (previene loop)
+        if (origin === "calendar" && !notionPageId) {
+          console.log(`⚪ Ignorado evento ${ev.id} con origin=calendar y sin notion_page_id`);
           continue;
         }
 
-        const notionPageId = ext.notion_page_id;
-
+        // Si existe notionPageId, actualizar la página
         if (notionPageId) {
           const archived = await isPageArchived(notionPageId);
-          if (!archived) {
-            let startDate, endDate;
-            if (isAllDayEvent(ev)) {
-              ({ startDate, endDate } = formatAllDayDates(ev.start.date, ev.end?.date));
-            } else {
-              startDate = ev.start?.dateTime;
-              endDate = ev.end?.dateTime || null;
-            }
-            const updateProps = {
-              Título: { title: [{ type: "text", text: { content: ev.summary || "Sin título" } }] },
-            };
-            if (startDate) {
-              updateProps["Fecha de entrega"] = {
-                date: endDate ? { start: startDate, end: endDate } : { start: startDate },
-              };
-            }
-            await notion.pages.update({ page_id: notionPageId, properties: updateProps });
-            console.log(`📝 Actualizada página Notion ${notionPageId} ← evento ${ev.id}`);
+          if (archived) {
+            console.log(`⚪ Página Notion ${notionPageId} ya archivada — ignoro.`);
+            continue;
           }
-        } else {
-          // 🚨 Nueva lógica anti-duplicados
-          // 1) Bloquear evento
-          await calendar.events.patch({
-            calendarId: CALENDAR_ID,
-            eventId: ev.id,
-            requestBody: {
-              extendedProperties: {
-                private: { ...ext, origin: "calendar", creating: "true" },
-              },
-            },
+
+          let startDate, endDate;
+          if (isAllDayEvent(ev)) {
+            ({ startDate, endDate } = formatAllDayDates(ev.start.date, ev.end?.date));
+          } else {
+            startDate = ev.start?.dateTime;
+            endDate = ev.end?.dateTime || null;
+          }
+
+          const updateProps = {
+            Título: { title: [{ type: "text", text: { content: ev.summary || "Sin título" } }] },
+          };
+          if (startDate) {
+            updateProps["Fecha de entrega"] = {
+              date: endDate ? { start: startDate, end: endDate } : { start: startDate },
+            };
+          }
+
+          await notion.pages.update({
+            page_id: notionPageId,
+            properties: updateProps,
           });
 
-          // 2) Crear página
-          const newPageId = await createNotionPage(ev);
+          console.log(`📝 Actualizada página Notion ${notionPageId} ← evento ${ev.id}`);
+        }
 
-          if (newPageId) {
-            // 3) Guardar notion_page_id y quitar creating
+        // Marcar evento con origin: "calendar" para evitar loops
+        await calendar.events.patch({
+          calendarId: CALENDAR_ID,
+          eventId: ev.id,
+          requestBody: {
+            extendedProperties: {
+              private: { ...(ev.extendedProperties?.private || {}), origin: "calendar" },
+            },
+          },
+        });
+
+        // Si no había notionPageId, crear página nueva y vincularla
+        if (!notionPageId) {
+          const newPageId = await createNotionPage(ev);
+          if (!newPageId) {
+            console.warn(`⚠️ No se creó página Notion para evento ${ev.id}`);
+          } else {
             await calendar.events.patch({
               calendarId: CALENDAR_ID,
               eventId: ev.id,
