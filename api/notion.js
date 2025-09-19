@@ -19,10 +19,10 @@ router.use(
 const VERIFICATION_TOKEN = process.env.NOTION_VERIFICATION_TOKEN;
 const NOTION_API_KEY = process.env.NOTION_API_KEY;
 const CALENDAR_ID = process.env.GOOGLE_CALENDAR_ID;
-const CLIENT_ID = process.env.CLIENT_ID;
-const CLIENT_SECRET = process.env.CLIENT_SECRET;
-const REDIRECT_URI = process.env.REDIRECT_URI;
-const REFRESH_TOKEN = process.env.REFRESH_TOKEN;
+const CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
+const CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
+const REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI;
+const REFRESH_TOKEN = process.env.GOOGLE_REFRESH_TOKEN;
 
 // --- Cliente de Notion ---
 const notion = new Client({ auth: NOTION_API_KEY });
